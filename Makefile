@@ -1,6 +1,9 @@
-EXECUTABLE=dns-controller-manager
-PROJECT=github.com/gardener/external-dns-management
-VERSION=$(shell cat VERSION)
+REGISTRY              := gcr.io/pingcap-public/gardener
+EXECUTABLE            := dns-controller-manager
+PROJECT               := github.com/gardener/external-dns-management
+IMAGE_REPOSITORY      := $(REGISTRY)/dns-controller-manager
+VERSION               := $(shell cat VERSION)
+IMAGE_TAG             := $(VERSION)
 
 .PHONY: revendor
 revendor:
@@ -14,8 +17,8 @@ check:
 
 .PHONY: build
 build:
-    @CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GO111MODULE=on go build -o $(EXECUTABLE) \
-        -mod=vendor \
+	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GO111MODULE=on go build -o $(EXECUTABLE) \
+	    -mod=vendor \
 	    -ldflags "-X main.Version=$(VERSION)-$(shell git rev-parse HEAD)"\
 	    ./cmd/dns
 
@@ -47,3 +50,8 @@ generate:
 alltests:
 	GO111MODULE=on go test -mod=vendor ./pkg/...
 	test/integration/run.sh $(kindargs) -- $(args)
+
+.PHONY: docker-images
+docker-images: build
+	@docker build -t $(IMAGE_REPOSITORY):$(IMAGE_TAG) -f build/Dockerfile .
+
