@@ -23,6 +23,11 @@ affinity: {}
 
 createCRDs: true
 
+gcpIdentity:
+  enable: false
+  image: gcr.io/pingcap-gardener/jenkins/gcp-web-identity:20201201
+  roleArn: ""
+
 configuration:
   # alicloudDNSCacheTtl: 120
   # alicloudDNSDefaultPoolSize: 2

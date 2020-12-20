@@ -24,9 +24,26 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       containers:
+      {{- if .Values.gcpIdentity.enable }}
+      - name: auth
+        image: {{ .Values.gcpIdentity.image }}
+        env:
+          - name: AWS_WEB_IDENTITY_TOKEN_FILE
+            value: /identity/token
+        volumeMounts:
+          - mountPath: /identity
+            name: identity
+      {{- end }}
       - name: {{ .Chart.Name }}
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- if .Values.gcpIdentity.enable }}
+        env:
+        - name: AWS_WEB_IDENTITY_TOKEN_FILE
+          value: /identity/token
+        - name: AWS_ROLE_ARN
+          value: {{ .Values.gcpIdentity.roleArn }}
+        {{- end }}
         args:
         - --name={{ include "external-dns-management.fullname" . }}
         {{- if or .Values.configuration.identifier (not .Values.gardener.seed.identity) }}
@@ -584,16 +601,28 @@ spec:
         {{- end }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
+        {{- if or (.Values.configuration.persistentCache) (.Values.gcpIdentity.enable) }}
         {{- if .Values.configuration.persistentCache }}
         volumeMounts:
           - name: persistent-cache
             mountPath: /persistent-cache
         {{- end }}
-      {{- if .Values.configuration.persistentCache }}
+        {{- if .Values.gcpIdentity.enable }}
+          - name: identity
+            mountPath: /identity
+        {{- end }}
+        {{- end }}
+      {{- if or (.Values.configuration.persistentCache) (.Values.gcpIdentity.enable) }}
       volumes:
+      {{- if .Values.configuration.persistentCache }}
         - name: persistent-cache
           persistentVolumeClaim:
             claimName: {{ include "external-dns-management.fullname" . }}
+      {{- end }}
+      {{- if .Values.gcpIdentity.enable }}
+        - name: identity
+          emptyDir: {}
+      {{- end }}
       {{- end }}
       serviceAccountName: {{ include "external-dns-management.fullname" . }}
       {{- if .Values.priorityClassName }}
