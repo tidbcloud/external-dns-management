@@ -602,8 +602,8 @@ spec:
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
         {{- if or (.Values.configuration.persistentCache) (.Values.gcpIdentity.enable) }}
-        {{- if .Values.configuration.persistentCache }}
         volumeMounts:
+        {{- if .Values.configuration.persistentCache }}
           - name: persistent-cache
             mountPath: /persistent-cache
         {{- end }}
