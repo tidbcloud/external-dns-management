@@ -25,6 +25,7 @@ import (
 	"github.com/gardener/controller-manager-library/pkg/logger"
 	"github.com/gardener/controller-manager-library/pkg/resources"
 	"github.com/gardener/controller-manager-library/pkg/utils"
+	"github.com/gardener/external-dns-management/pkg/apis/dns/v1alpha1"
 	"github.com/gardener/external-dns-management/pkg/dns"
 	dnsutils "github.com/gardener/external-dns-management/pkg/dns/utils"
 
@@ -139,6 +140,7 @@ type DNSHandlerConfig struct {
 	Context     context.Context
 	CacheConfig ZoneCacheConfig
 	Metrics     Metrics
+	Zones       *v1alpha1.DNSSelection
 }
 
 type DNSZoneState interface {

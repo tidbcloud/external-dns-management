@@ -178,6 +178,7 @@ func (this *AccountCache) Get(logger logger.LogContext, provider *dnsutils.DNSPr
 			Config:      provider.Spec().ProviderConfig,
 			DryRun:      state.GetConfig().Dryrun,
 			CacheConfig: cacheConfig,
+			Zones:       provider.Spec().Zones,
 			Metrics:     a,
 		}
 		a.handler, err = state.GetHandlerFactory().Create(provider.TypeCode(), &cfg)
