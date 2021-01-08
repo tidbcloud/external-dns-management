@@ -131,7 +131,23 @@ func (h *Handler) getZones(cache provider.ZoneCache) (provider.DNSHostedZones, e
 	}
 
 	zones := provider.DNSHostedZones{}
-	for _, z := range raw {
+
+	selected := []*route53.HostedZone{}
+	if h.config.Zones == nil || len(h.config.Zones.Include) < 1 {
+		// select all zones if no filter specified
+		selected = raw
+	} else {
+		// otherwise we filter zones using the given filter
+		for _, z := range raw {
+			for _, i := range h.config.Zones.Include {
+				if strings.HasSuffix(aws.StringValue(z.Id), i) {
+					selected = append(selected, z)
+					break
+				}
+			}
+		}
+	}
+	for _, z := range selected {
 		domain := aws.StringValue(z.Name)
 		comp := strings.Split(aws.StringValue(z.Id), "/")
 		id := comp[len(comp)-1]
