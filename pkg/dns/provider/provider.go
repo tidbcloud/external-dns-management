@@ -463,6 +463,10 @@ func (this *dnsProviderVersion) GetConfig() utils.Properties {
 	return this.account.config
 }
 
+func (this *dnsProviderVersion) GetZones() DNSHostedZones {
+	return this.zones
+}
+
 func (this *dnsProviderVersion) ones() DNSHostedZones {
 	return this.zones
 }
