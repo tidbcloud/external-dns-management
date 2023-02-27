@@ -9,27 +9,27 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 rules:
-  - apiGroups:
-      - ""
-    resources:
-      - services
-      - services/finalizers
-      - secrets
-    verbs:
-      - get
-      - list
-      - update
-      - watch
-  - apiGroups:
-      - extensions
-      - "networking.k8s.io"
-    resources:
-      - ingresses
-    verbs:
-      - get
-      - list
-      - update
-      - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  - services/finalizers
+  - secrets
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - extensions
+  - "networking.k8s.io"
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - update
+  - watch
 - apiGroups:
   - dns.gardener.cloud
   resources:
@@ -66,11 +66,11 @@ rules:
   - create
 {{- if semverCompare "<1.24-0" .Capabilities.KubeVersion.GitVersion }}
 - apiGroups:
-    - policy
+  - policy
   resources:
-    - podsecuritypolicies
+  - podsecuritypolicies
   resourceNames:
-    - {{ include "external-dns-management.fullname" . }}
+  - {{ include "external-dns-management.fullname" . }}
   verbs:
-    - use
+  - use
 {{- end }}
