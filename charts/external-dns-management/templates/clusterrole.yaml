@@ -1,5 +1,5 @@
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: {{ include "external-dns-management.fullname" . }}
@@ -11,11 +11,19 @@ metadata:
 rules:
 - apiGroups:
   - ""
-  - extensions
   resources:
   - services
   - services/finalizers
   - secrets
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - extensions
+  - "networking.k8s.io"
+  resources:
   - ingresses
   verbs:
   - get
@@ -53,3 +61,14 @@ rules:
   - list
   - update
   - create
+{{- if semverCompare "<1.24-0" .Capabilities.KubeVersion.GitVersion }}
+- apiGroups:
+  - policy
+  resources:
+  - podsecuritypolicies
+  resourceNames:
+  - {{ include "external-dns-management.fullname" . }}
+  verbs:
+  - use
+{{- end }}
+
