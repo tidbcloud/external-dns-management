@@ -55,3 +55,6 @@ alltests:
 docker-images: build
 	@docker build -t $(IMAGE_REPOSITORY):$(IMAGE_TAG) -f build/Dockerfile .
 
+.PHONY: docker-push
+docker-push:
+	@docker push $(IMAGE_REPOSITORY):$(IMAGE_TAG)
