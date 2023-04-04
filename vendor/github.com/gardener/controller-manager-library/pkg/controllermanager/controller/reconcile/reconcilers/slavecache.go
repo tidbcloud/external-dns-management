@@ -1,17 +1,7 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package reconcilers
@@ -19,14 +9,13 @@ package reconcilers
 import (
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/gardener/controller-manager-library/pkg/controllermanager/controller"
 	"github.com/gardener/controller-manager-library/pkg/controllermanager/controller/reconcile"
 	"github.com/gardener/controller-manager-library/pkg/logger"
 	"github.com/gardener/controller-manager-library/pkg/resources"
-	"github.com/gardener/controller-manager-library/pkg/utils"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 type Resources func(c controller.Interface) []resources.Interface
@@ -36,26 +25,45 @@ type Resources func(c controller.Interface) []resources.Interface
 // requiring slave access
 ////////////////////////////////////////////////////////////////////////////////
 
+type SlaveAccessSink interface {
+	InjectSlaveAccess(*SlaveAccess)
+}
+
+type ClusterGroupKinds map[string]resources.GroupKindSet
+
+func (this ClusterGroupKinds) Add(r resources.Interface) ClusterGroupKinds {
+	set := this[r.GetCluster().GetId()]
+	if set == nil {
+		set = resources.GroupKindSet{}
+		this[r.GetCluster().GetId()] = set
+	}
+	set.Add(r.GroupKind())
+	return this
+}
+
+func (this ClusterGroupKinds) Contains(clusterid string, gk schema.GroupKind) bool {
+	return this[clusterid].Contains(gk)
+}
+
+func (this ClusterGroupKinds) Matches(k resources.ClusterObjectKey) bool {
+	return this[k.Cluster()].Contains(k.GroupKind())
+}
+
 type _resources struct {
 	kinds     []schema.GroupKind
 	resources []resources.Interface
-	clusters  utils.StringSet
+	clusters  ClusterGroupKinds
 }
 
-func (this *_resources) Contains(g schema.GroupKind) bool {
-	for _, e := range this.kinds {
-		if e == g {
-			return true
-		}
-	}
-	return false
+func (this *_resources) Contains(clusterid string, g schema.GroupKind) bool {
+	return this.clusters[clusterid].Contains(g)
 }
 
 func (this *_resources) String() string {
 	str := ""
 	if this != nil {
-		for _, e := range this.kinds {
-			str += "|" + (&e).String()
+		for _, e := range this.resources {
+			str += "|" + e.GroupKind().String()
 		}
 		str += "|"
 	}
@@ -63,19 +71,28 @@ func (this *_resources) String() string {
 }
 
 func newResources(c controller.Interface, f Resources) *_resources {
-	var kinds []schema.GroupKind
-	clusters := utils.StringSet{}
-	resources := f(c)
-	for _, r := range resources {
-		kinds = append(kinds, r.GroupKind())
-		clusters.Add(r.GetCluster().GetId())
+	kinds := resources.GroupKindSet{}
+	clusters := map[string]resources.GroupKindSet{}
+	res := f(c)
+	for _, r := range res {
+		set := clusters[r.GetCluster().GetId()]
+		if set == nil {
+			set = resources.GroupKindSet{}
+			clusters[r.GetCluster().GetId()] = set
+		}
+		kinds.Add(r.GroupKind())
+		set.Add(r.GroupKind())
 	}
 	return &_resources{
-		kinds:     kinds,
-		resources: resources,
+		kinds:     kinds.AsArray(),
+		resources: res,
 		clusters:  clusters,
 	}
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// SlaveAccess used to access a shared slave cache
+////////////////////////////////////////////////////////////////////////////////
 
 type SlaveAccess struct {
 	controller.Interface
@@ -85,17 +102,34 @@ type SlaveAccess struct {
 	slave_resources  *_resources
 	master_resources *_resources
 	slavefilters     []resources.ObjectFilter
+	migration        resources.ClusterIdMigration
+	gkMigration      resources.GroupKindMigration
 	spec             SlaveAccessSpec
 }
 
 type SlaveAccessSpec struct {
-	Name    string
-	Slaves  Resources
-	Masters Resources
+	Name            string
+	Namespace       string
+	Slaves          Resources
+	Masters         Resources
+	RequeueDeleting bool
+
+	ClusterIdMigration resources.ClusterIdMigration
+	GroupKindMigration resources.GroupKindMigration
+}
+
+func NewSlaveAccessSpec(c controller.Interface, name string, slave_func Resources, master_func Resources) SlaveAccessSpec {
+	return SlaveAccessSpec{
+		Name:               name,
+		Slaves:             slave_func,
+		Masters:            master_func,
+		ClusterIdMigration: c.GetEnvironment().ControllerManager().GetClusterIdMigration(),
+		GroupKindMigration: c.GetEnvironment().ControllerManager().GetGroupKindMigration(),
+	}
 }
 
 func NewSlaveAccess(c controller.Interface, name string, slave_func Resources, master_func Resources) *SlaveAccess {
-	return NewSlaveAccessBySpec(c, SlaveAccessSpec{Name: name, Slaves: slave_func, Masters: master_func})
+	return NewSlaveAccessBySpec(c, NewSlaveAccessSpec(c, name, slave_func, master_func))
 }
 
 func NewSlaveAccessBySpec(c controller.Interface, spec SlaveAccessSpec) *SlaveAccess {
@@ -104,22 +138,25 @@ func NewSlaveAccessBySpec(c controller.Interface, spec SlaveAccessSpec) *SlaveAc
 		name:             spec.Name,
 		slave_resources:  newResources(c, spec.Slaves),
 		master_resources: newResources(c, spec.Masters),
+		migration:        spec.ClusterIdMigration,
+		gkMigration:      spec.GroupKindMigration,
 		spec:             spec,
 	}
 }
 
 type accesskey struct {
-	name    string
-	masters string
-	slaves  string
+	name      string
+	namespace string
+	masters   string
+	slaves    string
 }
 
 func (this accesskey) String() string {
-	return fmt.Sprintf("%s:[%s%s]", this.name, this.masters, this.slaves)
+	return fmt.Sprintf("%s/%s:[%s%s]", this.namespace, this.name, this.masters, this.slaves)
 }
 
 func (this *SlaveAccess) Key() interface{} {
-	return accesskey{name: this.name, masters: this.master_resources.String(), slaves: this.slave_resources.String()}
+	return accesskey{name: this.name, namespace: this.spec.Namespace, masters: this.master_resources.String(), slaves: this.slave_resources.String()}
 }
 
 func (this *SlaveAccess) Setup() {
@@ -134,11 +171,11 @@ func (this *SlaveAccess) AddSlaveFilter(filter ...resources.ObjectFilter) {
 }
 
 func (this *SlaveAccess) setupSlaveCache() interface{} {
-	cache := resources.NewSlaveCache()
+	cache := resources.NewSlaveCache(this.migration, this.gkMigration)
 	cache.AddSlaveFilter(this.slavefilters...)
 	this.Infof("setup %s owner cache", this.name)
 	for _, r := range this.slave_resources.resources {
-		list, _ := r.ListCached(labels.Everything())
+		list, _ := listCachedWithNamespace(r, this.spec.Namespace)
 		cache.Setup(list)
 	}
 	this.Infof("found %d %s(s) for %d owners", cache.SlaveCount(), this.name, cache.Size())
@@ -157,6 +194,10 @@ func (this *SlaveAccess) CreateSlave(obj resources.Object, slave resources.Objec
 	return this.slaves.CreateSlave(obj, slave)
 }
 
+func (this *SlaveAccess) CreateOrModifySlave(obj resources.Object, slave resources.Object, mod resources.Modifier) (bool, error) {
+	return this.slaves.CreateOrModifySlave(obj, slave, mod)
+}
+
 func (this *SlaveAccess) UpdateSlave(slave resources.Object) error {
 	return this.slaves.UpdateSlave(slave)
 }
@@ -167,13 +208,17 @@ func (this *SlaveAccess) AddSlave(obj resources.Object, slave resources.Object) 
 
 func (this *SlaveAccess) LookupSlaves(key resources.ClusterObjectKey, kinds ...schema.GroupKind) []resources.Object {
 	found := []resources.Object{}
-	if len(kinds) == 0 {
-		kinds = this.slave_resources.kinds
-	}
+
 	for _, o := range this.slaves.GetByOwnerKey(key) {
-		for _, k := range kinds {
-			if o.GroupKind() == k {
+		if len(kinds) == 0 {
+			if this.slave_resources.clusters[o.GetCluster().GetId()].Contains(o.GroupKind()) {
 				found = append(found, o)
+			}
+		} else {
+			for _, k := range kinds {
+				if o.GroupKind() == k {
+					found = append(found, o)
+				}
 			}
 		}
 	}
@@ -233,13 +278,13 @@ func (this *SlaveAccess) GetMasters(all_clusters bool, kinds ...schema.GroupKind
 	return filterKeysByClusters(set, this.master_resources.clusters)
 }
 
-func filterKeysByClusters(set resources.ClusterObjectKeySet, clusters utils.StringSet, kinds ...schema.GroupKind) resources.ClusterObjectKeySet {
+func filterKeysByClusters(set resources.ClusterObjectKeySet, clusters ClusterGroupKinds, kinds ...schema.GroupKind) resources.ClusterObjectKeySet {
 	if clusters == nil {
 		return set
 	}
 	new := resources.ClusterObjectKeySet{}
 	for k := range set {
-		if clusters.Contains(k.Cluster()) {
+		if clusters.Matches(k) {
 			new.Add(k)
 		}
 	}
@@ -268,6 +313,14 @@ func SlaveReconcilerType(name string, slaveResources Resources, reconciler contr
 	}
 }
 
+type SlaveAccessSpecCreator func(c controller.Interface) SlaveAccessSpec
+
+func SlaveReconcilerTypeByFunction(reconciler controller.ReconcilerType, creator SlaveAccessSpecCreator) controller.ReconcilerType {
+	return func(c controller.Interface) (reconcile.Interface, error) {
+		return NewSlaveReconcilerBySpec(c, reconciler, creator(c))
+	}
+}
+
 func SlaveReconcilerTypeBySpec(reconciler controller.ReconcilerType, spec SlaveAccessSpec) controller.ReconcilerType {
 	return func(c controller.Interface) (reconcile.Interface, error) {
 		return NewSlaveReconcilerBySpec(c, reconciler, spec)
@@ -286,6 +339,9 @@ func NewSlaveReconcilerBySpec(c controller.Interface, reconciler controller.Reco
 	if err != nil {
 		return nil, err
 	}
+	if s, ok := nested.nested.(SlaveAccessSink); ok {
+		s.InjectSlaveAccess(r.SlaveAccess)
+	}
 	r.NestedReconciler = nested
 	return r, nil
 }
@@ -297,9 +353,24 @@ type SlaveReconciler struct {
 
 var _ reconcile.Interface = &SlaveReconciler{}
 
-func (this *SlaveReconciler) Setup() {
+func (this *SlaveReconciler) Setup() error {
 	this.SlaveAccess.Setup()
-	this.NestedReconciler.Setup()
+	return this.NestedReconciler.Setup()
+}
+
+func (this *SlaveReconciler) Start() error {
+	this.Infof("determining dangling %s objects...", this.spec.Name)
+	for k := range this.SlaveAccess.GetMasters(false) {
+		if this.master_resources.Contains(k.Cluster(), k.GroupKind()) {
+			if _, err := this.GetClusterById(k.Cluster()).GetCachedObject(k); errors.IsNotFound(err) {
+				this.Infof("trigger vanished origin %s", k.ObjectKey())
+				this.EnqueueKey(k)
+			} else {
+				this.Debugf("found origin %s", k.ObjectKey())
+			}
+		}
+	}
+	return this.NestedReconciler.Start()
 }
 
 func (this *SlaveReconciler) Reconcile(logger logger.LogContext, obj resources.Object) reconcile.Status {
@@ -320,7 +391,7 @@ func (this *SlaveReconciler) requeueMasters(logger logger.LogContext, masters re
 	for key := range masters {
 		m, err := this.GetObject(key)
 		if err == nil || errors.IsNotFound(err) {
-			if m.IsDeleting() {
+			if !this.spec.RequeueDeleting && m.IsDeleting() {
 				logger.Infof("skipping requeue of deleting master %s", key)
 				continue
 			}

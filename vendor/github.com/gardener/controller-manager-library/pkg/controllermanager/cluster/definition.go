@@ -1,17 +1,7 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package cluster
@@ -19,22 +9,29 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"sync"
 
-	"github.com/gardener/controller-manager-library/pkg/controllermanager/config"
+	areacfg "github.com/gardener/controller-manager-library/pkg/controllermanager/config"
 	"github.com/gardener/controller-manager-library/pkg/logger"
+	"github.com/gardener/controller-manager-library/pkg/resources"
 	"github.com/gardener/controller-manager-library/pkg/utils"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const CLUSTERID_GROUP = "gardener.cloud"
 
 type Definitions interface {
 	Get(name string) Definition
-	CreateClusters(ctx context.Context, logger logger.LogContext, cfg *config.Config, names utils.StringSet) (Clusters, error)
-	ExtendConfig(cfg *config.Config)
+	CreateClusters(ctx context.Context, logger logger.LogContext, cfg *areacfg.Config, cache SchemeCache, names utils.StringSet) (Clusters, error)
+	ExtendConfig(cfg *areacfg.Config)
 	GetScheme() *runtime.Scheme
+	ClusterNames() []string
+	Reconfigure(modifiers ...ConfigurationModifier) Definitions
 }
+
+type ConfigurationModifier func(c Configuration) Configuration
 
 var _ Definitions = &_Definitions{}
 
@@ -43,6 +40,13 @@ type Definition interface {
 	Description() string
 	ConfigOptionName() string
 	Fallback() string
+	Scheme() *runtime.Scheme
+
+	Definition() Definition
+	Configure() Configuration
+
+	IsMinimalWatchEnforced(schema.GroupKind) bool
+	MinimalWatches() []schema.GroupKind
 }
 
 type _Definition struct {
@@ -50,10 +54,19 @@ type _Definition struct {
 	fallback         string
 	configOptionName string
 	description      string
+	scheme           *runtime.Scheme
+	minimalWatches   resources.GroupKindSet
 }
 
 func copy(d Definition) *_Definition {
-	return &_Definition{d.Name(), d.Fallback(), d.ConfigOptionName(), d.Description()}
+	return &_Definition{
+		d.Name(),
+		d.Fallback(),
+		d.ConfigOptionName(),
+		d.Description(),
+		d.Scheme(),
+		resources.NewGroupKindSetByArray(d.MinimalWatches()),
+	}
 }
 
 func (this *_Definition) Name() string {
@@ -68,26 +81,65 @@ func (this *_Definition) Description() string {
 func (this *_Definition) Fallback() string {
 	return this.fallback
 }
+func (this *_Definition) Scheme() *runtime.Scheme {
+	return this.scheme
+}
+func (this *_Definition) Definition() Definition {
+	copy := this.copy()
+	return &copy
+}
+
+func (this *_Definition) IsMinimalWatchEnforced(gk schema.GroupKind) bool {
+	return this.minimalWatches.Contains(gk)
+}
+
+func (this *_Definition) MinimalWatches() []schema.GroupKind {
+	return this.minimalWatches.AsArray()
+}
+
+func (this *_Definition) Configure() Configuration {
+	return Configuration{this.copy()}
+}
+
+func (this *_Definition) copy() _Definition {
+	copy := *this
+	copy.minimalWatches = resources.NewGroupKindSetByArray(this.MinimalWatches())
+	return copy
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-func (this *_Definitions) create(ctx context.Context, logger logger.LogContext, cfg *config.Config, req Definition, option string) (Interface, error) {
-	idopt := cfg.GetOption(req.ConfigOptionName() + SUBOPTION_ID)
-	id := ""
-	if idopt != nil && idopt.Changed() {
-		id = idopt.StringValue()
+type _Definitions struct {
+	lock        sync.RWMutex
+	definitions Registrations
+	scheme      *runtime.Scheme
+}
+
+var _ Definition = &_Definition{}
+var _ Definitions = &_Definitions{}
+
+func (this *_Definitions) create(ctx context.Context, logger logger.LogContext, cfg *Config, req Definition) (Interface, error) {
+
+	id := cfg.ClusterId
+	if id != "" {
 		logger.Infof("found id %q for cluster %q", id, req.Name())
 	}
-	cluster, err := CreateCluster(ctx, logger, req, id, option)
+	if req.Scheme() == nil {
+		req = req.Configure().Scheme(this.scheme).Definition()
+	}
+	cluster, err := CreateCluster(ctx, logger, req, id, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	crdsOpt := cfg.GetOption(req.ConfigOptionName() + SUBOPTION_DISABLE_DEPLOY_CRDS)
-	if crdsOpt != nil && crdsOpt.Changed() {
+	crds := cfg.OmitCRDs
+	if crds {
 		cluster.SetAttr(SUBOPTION_DISABLE_DEPLOY_CRDS, true)
 	}
 
+	if !cfg.MigrationIds.IsEmpty() {
+		cluster.AddMigrationIds(cfg.MigrationIds.AsArray()...)
+	}
 	err = callExtensions(func(e Extension) error { return e.Extend(cluster, cfg) })
 	if err != nil {
 		return nil, err
@@ -96,8 +148,8 @@ func (this *_Definitions) create(ctx context.Context, logger logger.LogContext, 
 	return cluster, nil
 }
 
-func (this *_Definitions) CreateClusters(ctx context.Context, logger logger.LogContext, cfg *config.Config, names utils.StringSet) (Clusters, error) {
-	clusters := NewClusters()
+func (this *_Definitions) CreateClusters(ctx context.Context, logger logger.LogContext, cfg *areacfg.Config, cache SchemeCache, names utils.StringSet) (Clusters, error) {
+	clusters := NewClusters(cache)
 	this.lock.RLock()
 	defer this.lock.RUnlock()
 
@@ -125,26 +177,21 @@ func (this *_Definitions) CreateClusters(ctx context.Context, logger logger.LogC
 	return clusters, nil
 }
 
-func (this *_Definitions) handleCluster(ctx context.Context, logger logger.LogContext, cfg *config.Config, found *_Clusters, missing utils.StringSet, name string) error {
+func (this *_Definitions) handleCluster(ctx context.Context, logger logger.LogContext, cfg *areacfg.Config, found *_Clusters, missing utils.StringSet, name string) error {
 	var err error
 	var c Interface
 	fallback := ""
 	defaultRequest := this.definitions[DEFAULT]
+	defaultOptions := cfg.GetSource(configTargetKey(defaultRequest)).(*Config)
+
 	req := this.definitions[name]
 	if req == nil {
 		return fmt.Errorf("no definition for cluster %s", name)
 	}
+	ccfg := cfg.GetSource(configTargetKey(req)).(*Config)
 
-	opt := cfg.GetOption(req.ConfigOptionName())
-	//if opt != nil && opt.StringValue() != "" {
-	//	logger.Infof("  handle cluster %s (%s=%s", name, opt.Name, opt.StringValue() )
-	//
-	//} else {
-	//	logger.Infof("  handle cluster %s (no config) fallback=%s", name, req.Fallback())
-	//}
-
-	if name != DEFAULT && opt != nil && opt.Changed() {
-		c, err = this.create(ctx, logger, cfg, req, opt.StringValue())
+	if name != DEFAULT && ccfg.IsConfigured() {
+		c, err = this.create(ctx, logger, ccfg, req)
 		if err != nil {
 			return err
 		}
@@ -152,12 +199,7 @@ func (this *_Definitions) handleCluster(ctx context.Context, logger logger.LogCo
 		if req.Fallback() == "" || req.Fallback() == DEFAULT {
 			c = found.effective[DEFAULT]
 			if c == nil {
-				opt := cfg.GetOption(defaultRequest.ConfigOptionName())
-				configname := ""
-				if opt != nil {
-					configname = opt.StringValue()
-				}
-				c, err = this.create(ctx, logger, cfg, defaultRequest, configname)
+				c, err = this.create(ctx, logger, defaultOptions, defaultRequest)
 				if err != nil {
 					return err
 				}
@@ -181,21 +223,52 @@ func (this *_Definitions) handleCluster(ctx context.Context, logger logger.LogCo
 	return nil
 }
 
-func (this *_Definitions) ExtendConfig(cfg *config.Config) {
+func (this *_Definitions) ExtendConfig(cfg *areacfg.Config) {
 	this.lock.RLock()
 	defer this.lock.RUnlock()
 
 	for _, req := range this.definitions {
-		if req.ConfigOptionName() != "" {
-			opt, _ := cfg.AddStringOption(req.ConfigOptionName())
-			opt.Description = req.Description()
-
-			opt, _ = cfg.AddStringOption(req.ConfigOptionName() + SUBOPTION_ID)
-			opt.Description = fmt.Sprintf("id for cluster %s", req.Name())
-
-			opt, _ = cfg.AddBoolOption(req.ConfigOptionName() + SUBOPTION_DISABLE_DEPLOY_CRDS)
-			opt.Description = fmt.Sprintf("disable deployment of required crds for cluster %s", req.Name())
-		}
-		callExtensions(func(e Extension) error { e.ExtendConfig(req, cfg); return nil })
+		clusterCfg := NewConfig(req)
+		cfg.AddSource(configTargetKey(req), clusterCfg)
 	}
+}
+
+func (this *_Definitions) ClusterNames() []string {
+	this.lock.RLock()
+	defer this.lock.RUnlock()
+	names := []string{}
+	for k := range this.definitions {
+		names = append(names, k)
+	}
+	return names
+}
+
+func (this *_Definitions) Get(name string) Definition {
+	this.lock.RLock()
+	defer this.lock.RUnlock()
+	if c, ok := this.definitions[name]; ok {
+		return c
+	}
+	return nil
+}
+
+func (this *_Definitions) GetScheme() *runtime.Scheme {
+	this.lock.RLock()
+	defer this.lock.RUnlock()
+	return this.scheme
+}
+
+func (this *_Definitions) Reconfigure(modifiers ...ConfigurationModifier) Definitions {
+	this.lock.RLock()
+	defer this.lock.RUnlock()
+
+	definitions := &_Definitions{definitions: Registrations{}, scheme: this.scheme}
+	for _, name := range this.ClusterNames() {
+		configuration := this.Get(name).Configure()
+		for _, modifier := range modifiers {
+			configuration = modifier(configuration)
+		}
+		definitions.definitions[name] = configuration.Definition()
+	}
+	return definitions
 }

@@ -1,17 +1,7 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package utils
@@ -28,7 +18,11 @@ func IsNil(o interface{}) bool {
 		return true
 	}
 	v := reflect.ValueOf(o)
-	return v.Kind() == reflect.Ptr && v.IsNil()
+	switch v.Kind() {
+	case reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func, reflect.Ptr, reflect.UnsafePointer:
+		return v.IsNil()
+	}
+	return false
 }
 
 func SetValue(f reflect.Value, v interface{}) error {
@@ -41,10 +35,44 @@ func SetValue(f reflect.Value, v interface{}) error {
 		}
 	}
 	if !f.CanSet() {
-		f = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem() // yepp, access unexported fields
+		if !f.CanInterface() && f.CanAddr() {
+			f = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem() // yepp, access unexported fields
+		}
 	}
 	f.Set(vv)
 	return nil
+}
+
+func GetValue(f reflect.Value) interface{} {
+	if !f.CanInterface() && f.CanAddr() {
+		f = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem() // yepp, access unexported fields
+	}
+	return f.Interface()
+}
+
+func SplitString(n string, sel func(s string) (string, bool), seps ...string) []string {
+	var result []string
+	sep := ","
+	if len(seps) > 0 {
+		sep = seps[0]
+	}
+	for _, p := range strings.Split(n, sep) {
+		if v, ok := sel(p); ok {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
+func Sanitize(list []string, sel func(s string) (string, bool)) []string {
+	for i := 0; i < len(list); i++ {
+		if v, ok := sel(list[i]); ok {
+			list[i] = v
+		} else {
+			list = append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
 }
 
 func IsEmptyString(s *string) bool {
@@ -76,4 +104,27 @@ func Int64Equal(a, b *int64) bool {
 
 func Strings(s ...string) string {
 	return "[" + strings.Join(s, ", ") + "]"
+}
+
+func Interfaces(elems ...interface{}) string {
+	r := "["
+	sep := ""
+	for _, e := range elems {
+		r = fmt.Sprintf("%s%s%s", r, sep, e)
+		sep = ", "
+	}
+	return r + "]"
+}
+
+func StringArrayAddUnique(array *[]string, values ...string) []string {
+values:
+	for _, v := range values {
+		for _, o := range *array {
+			if v == o {
+				continue values
+			}
+		}
+		*array = append(*array, v)
+	}
+	return *array
 }

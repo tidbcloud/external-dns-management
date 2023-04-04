@@ -1,26 +1,17 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package resources
 
 import (
-	"fmt"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/gardener/controller-manager-library/pkg/resources/errors"
 )
 
 type OwnerDetector func(sub Object) ClusterObjectKeySet
@@ -231,7 +222,7 @@ func (this *SubObjectCache) GetByOwnerKey(key ClusterObjectKey) []Object {
 
 func (this *SubObjectCache) CreateSubObject(sub Object) error {
 	if !this.filterSubObject(sub) {
-		return fmt.Errorf("sub object %s is rejected from sub object cache", sub.ClusterKey())
+		return errors.New(errors.ERR_OBJECT_REJECTED, "sub object %s is rejected from sub object cache", sub.ClusterKey())
 	}
 	this.lock.Lock()
 	defer this.lock.Unlock()
@@ -240,6 +231,19 @@ func (this *SubObjectCache) CreateSubObject(sub Object) error {
 		this.renewSubObject(sub)
 	}
 	return err
+}
+
+func (this *SubObjectCache) CreateOrModifySubObject(sub Object, mod Modifier) (bool, error) {
+	if !this.filterSubObject(sub) {
+		return false, errors.New(errors.ERR_OBJECT_REJECTED, "sub object %s is rejected from sub object cache", sub.ClusterKey())
+	}
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	b, err := sub.CreateOrModify(mod)
+	if err == nil {
+		this.renewSubObject(sub)
+	}
+	return b, err
 }
 
 func (this *SubObjectCache) add(owner ClusterObjectKey, sub Object) {

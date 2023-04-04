@@ -1,41 +1,33 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package resources
 
 import (
-	"fmt"
-	"k8s.io/apimachinery/pkg/labels"
 	"runtime/debug"
+
+	"k8s.io/apimachinery/pkg/labels"
+
+	"github.com/gardener/controller-manager-library/pkg/resources/errors"
 )
 
 func (this *_resource) getCached(namespace, name string) (Object, error) {
 	var obj ObjectData
-	informer, err := this.self.I_lookupInformer(namespace)
+	informer, err := this.helper.Internal.I_lookupInformer(false, namespace)
 	if err != nil {
 		return nil, err
 	}
 	if this.info.Namespaced() {
 		if namespace == "" {
-			return nil, fmt.Errorf("resourcename %s (%s) is namespaced", this.Name(), this.GroupVersionKind())
+			return nil, errors.ErrNamespaced.New(this.GroupVersionKind())
 		}
 		obj, err = informer.Lister().Namespace(namespace).Get(name)
 	} else {
 		if namespace != "" {
-			return nil, fmt.Errorf("resourcename %s (%s) is not namespaced", this.Name(), this.GroupVersionKind())
+			return nil, errors.ErrNotNamespaced.New(this.GroupVersionKind())
 		}
 		obj, err = informer.Lister().Get(name)
 	}
@@ -50,40 +42,40 @@ func (this *_resource) GetCached(obj interface{}) (Object, error) {
 	case string:
 		return this.getCached("", o)
 	case ObjectData:
-		if err := this.helper.CheckOType(o); err != nil {
+		if err := this.CheckOType(o); err != nil {
 			return nil, err
 		}
-		return this.helper.ObjectAsResource(o), nil
+		return this.getCached(o.GetNamespace(), o.GetName())
 	case ObjectKey:
 		if o.GroupKind() != this.GroupKind() {
-			return nil, fmt.Errorf("%s cannot handle group/kind '%s'", this.gvk, o.GroupKind())
+			return nil, errors.ErrResourceMismatch.New(this.GroupVersionKind(), o.GroupKind())
 		}
 		return this.getCached(o.Namespace(), o.Name())
 	case *ObjectKey:
 		if o.GroupKind() != this.GroupKind() {
-			return nil, fmt.Errorf("%s cannot handle group/kind '%s'", this.gvk, o.GroupKind())
+			return nil, errors.ErrResourceMismatch.New(this.GroupVersionKind(), o.GroupKind())
 		}
 		return this.getCached(o.Namespace(), o.Name())
 	case ClusterObjectKey:
 		if o.GroupKind() != this.GroupKind() {
-			return nil, fmt.Errorf("%s cannot handle group/kind '%s'", this.gvk, o.GroupKind())
+			return nil, errors.ErrResourceMismatch.New(this.GroupVersionKind(), o.GroupKind())
 		}
 		return this.getCached(o.Namespace(), o.Name())
 	case *ClusterObjectKey:
 		if o.GroupKind() != this.GroupKind() {
-			return nil, fmt.Errorf("%s cannot handle group/kind '%s'", this.gvk, o.GroupKind())
+			return nil, errors.ErrResourceMismatch.New(this.GroupVersionKind(), o.GroupKind())
 		}
 		return this.getCached(o.Namespace(), o.Name())
 	case ObjectName:
 		return this.getCached(o.Namespace(), o.Name())
 	default:
 		debug.PrintStack()
-		return nil, fmt.Errorf("unsupported type '%T' for source object", obj)
+		return nil, errors.ErrUnexpectedType.New("object identifier", obj)
 	}
 }
 
 func (this *_resource) ListCached(selector labels.Selector) (ret []Object, err error) {
-	informer, err := this.self.I_getInformer("", nil)
+	informer, err := this.helper.Internal.I_getInformer(false, "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +92,7 @@ func (this *_resource) ListCached(selector labels.Selector) (ret []Object, err e
 
 func (this *namespacedResource) getLister() (NamespacedLister, error) {
 	if this.lister == nil {
-		informer, err := this.resource.self.I_lookupInformer(this.namespace)
+		informer, err := this.resource.helper.Internal.I_lookupInformer(false, this.namespace)
 		if err != nil {
 			return nil, err
 		}

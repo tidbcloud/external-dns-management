@@ -1,29 +1,22 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package resources
 
 import (
 	"fmt"
-	"github.com/Masterminds/semver"
 	"strings"
 	"sync"
 
+	"github.com/Masterminds/semver/v3"
+
 	"github.com/gardener/controller-manager-library/pkg/logger"
+	"github.com/gardener/controller-manager-library/pkg/resources/errors"
 	"github.com/gardener/controller-manager-library/pkg/utils"
+
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -91,7 +84,7 @@ func (this *Info) InfoString() string {
 type ResourceInfos struct {
 	lock              sync.RWMutex
 	groupVersionKinds map[schema.GroupVersion]map[string]*Info
-	preferredVersions map[string]string
+	preferredVersions map[schema.GroupKind]string
 	cluster           Cluster
 	mapper            meta.RESTMapper
 	version           *semver.Version
@@ -100,7 +93,7 @@ type ResourceInfos struct {
 func NewResourceInfos(c Cluster) (*ResourceInfos, error) {
 	res := &ResourceInfos{
 		groupVersionKinds: map[schema.GroupVersion]map[string]*Info{},
-		preferredVersions: map[string]string{},
+		preferredVersions: map[schema.GroupKind]string{},
 		cluster:           c,
 	}
 	err := res.update()
@@ -193,8 +186,11 @@ func (this *ResourceInfos) update() error {
 		logger.Infof("found %d resources", len(list))
 	}
 	for _, rl := range list {
+		// fmt.Printf("# PREFERRED: %s\n", rl.GroupVersion)
 		gv, _ := schema.ParseGroupVersion(rl.GroupVersion)
-		this.preferredVersions[gv.Group] = gv.Version
+		for _, r := range rl.APIResources {
+			this.preferredVersions[NewGroupKind(gv.Group, r.Kind)] = gv.Version
+		}
 	}
 
 	return nil
@@ -203,9 +199,16 @@ func (this *ResourceInfos) update() error {
 func (this *ResourceInfos) GetGroups() []schema.GroupVersion {
 	this.lock.RLock()
 	defer this.lock.RUnlock()
-	grps := make([]schema.GroupVersion, len(this.preferredVersions))[0:0]
-	for g, v := range this.preferredVersions {
-		grps = append(grps, schema.GroupVersion{Group: g, Version: v})
+	grps := []schema.GroupVersion{}
+outer:
+	for gk, v := range this.preferredVersions {
+		gv := schema.GroupVersion{gk.Group, v}
+		for _, f := range grps {
+			if f.Group == gv.Group && f.Version == gv.Version {
+				continue outer
+			}
+		}
+		grps = append(grps, gv)
 	}
 	return grps
 }
@@ -234,7 +237,7 @@ func (this *ResourceInfos) GetPreferred(gk schema.GroupKind) (*Info, error) {
 		i = this.getPreferred(gk)
 	}
 	if i == nil {
-		return nil, fmt.Errorf("%s not known", gk)
+		return nil, errors.ErrUnknownResource.New("group kind", gk)
 	}
 	return i, nil
 }
@@ -242,7 +245,7 @@ func (this *ResourceInfos) GetPreferred(gk schema.GroupKind) (*Info, error) {
 func (this *ResourceInfos) getPreferred(gk schema.GroupKind) *Info {
 	this.lock.RLock()
 	defer this.lock.RUnlock()
-	v, ok := this.preferredVersions[gk.Group]
+	v, ok := this.preferredVersions[gk]
 	if !ok {
 		return nil
 	}
@@ -263,7 +266,7 @@ func (this *ResourceInfos) Get(gvk schema.GroupVersionKind) (*Info, error) {
 		i = this.get(gvk)
 	}
 	if i == nil {
-		return nil, fmt.Errorf("%s not known", gvk)
+		return nil, errors.ErrUnknownResource.New("group version kind", gvk)
 	}
 	return i, nil
 }

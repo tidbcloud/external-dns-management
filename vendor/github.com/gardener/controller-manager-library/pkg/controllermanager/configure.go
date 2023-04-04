@@ -1,89 +1,135 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package controllermanager
 
 import (
 	"github.com/gardener/controller-manager-library/pkg/controllermanager/cluster"
-	"github.com/gardener/controller-manager-library/pkg/controllermanager/controller"
-	"github.com/gardener/controller-manager-library/pkg/controllermanager/controller/groups"
-	"github.com/gardener/controller-manager-library/pkg/controllermanager/controller/mappings"
+	"github.com/gardener/controller-manager-library/pkg/controllermanager/extension"
+	resources "github.com/gardener/controller-manager-library/pkg/resources/plain"
+
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+type ConfigurationModifier func(c Configuration) Configuration
+
 type Configuration struct {
-	name           string
-	description    string
-	cluster_reg    cluster.Registry
-	controller_reg controller.Registry
+	name          string
+	description   string
+	extension_reg extension.ExtensionRegistry
+	cluster_reg   cluster.Registry
+	configState
+
+	globalMinimalWatch  resources.GroupKindSet
+	clusterMinimalWatch map[string]resources.GroupKindSet
+	groupKindMigrations []schema.GroupKind
+}
+
+type configState struct {
+	previous *configState
+}
+
+func (this *configState) pushState() {
+	save := *this
+	this.previous = &save
 }
 
 var _ cluster.RegistrationInterface = &Configuration{}
-var _ mappings.RegistrationInterface = &Configuration{}
-var _ groups.RegistrationInterface = &Configuration{}
-var _ controller.RegistrationInterface = &Configuration{}
 
 func Configure(name, desc string, scheme *runtime.Scheme) Configuration {
 	return Configuration{
-		name:           name,
-		description:    desc,
-		cluster_reg:    cluster.NewRegistry(scheme),
-		controller_reg: controller.NewRegistry(),
+		name:          name,
+		description:   desc,
+		extension_reg: extension.NewExtensionRegistry(),
+		cluster_reg:   cluster.NewRegistry(scheme),
+		configState:   configState{},
+
+		globalMinimalWatch:  resources.GroupKindSet{},
+		clusterMinimalWatch: map[string]resources.GroupKindSet{},
 	}
 }
 
-func (this Configuration) ByDefault() Configuration {
-	this.cluster_reg = cluster.DefaultRegistry()
-	this.controller_reg = controller.DefaultRegistry()
+func (this Configuration) With(modifier ...ConfigurationModifier) Configuration {
+	save := this.configState
+	result := this
+	for _, m := range modifier {
+		result = m(result)
+	}
+	result.configState = save
+	return result
+}
+
+func (this Configuration) Restore() Configuration {
+	if &this.configState != nil {
+		this.configState = *this.configState.previous
+	}
 	return this
+}
+
+func (this Configuration) ByDefault() Configuration {
+	this.extension_reg = extension.DefaultRegistry()
+	this.cluster_reg = cluster.DefaultRegistry()
+	return this
+}
+
+func (this Configuration) GlobalMinimalWatch(groupKinds ...schema.GroupKind) Configuration {
+	this.globalMinimalWatch.AddAll(groupKinds)
+	return this
+}
+
+func (this Configuration) GlobalGroupKindMigrations(groupKinds ...schema.GroupKind) Configuration {
+	this.groupKindMigrations = append(this.groupKindMigrations, groupKinds...)
+	return this
+}
+
+func (this Configuration) MinimalWatch(clusterName string, groupKinds ...schema.GroupKind) Configuration {
+	m, ok := this.clusterMinimalWatch[clusterName]
+	if !ok {
+		m = resources.GroupKindSet{}
+		this.clusterMinimalWatch[clusterName] = m
+	}
+	m.AddAll(groupKinds)
+	return this
+}
+
+func (this Configuration) RegisterExtension(reg extension.ExtensionType) {
+	this.extension_reg.RegisterExtension(reg)
+}
+
+func (this Configuration) Extension(name string) extension.ExtensionType {
+	for _, e := range this.extension_reg.GetExtensionTypes() {
+		if e.Name() == name {
+			return e
+		}
+	}
+	return nil
 }
 
 func (this Configuration) RegisterCluster(reg cluster.Registerable) error {
 	return this.cluster_reg.RegisterCluster(reg)
 }
+
 func (this Configuration) MustRegisterCluster(reg cluster.Registerable) cluster.RegistrationInterface {
 	return this.cluster_reg.MustRegisterCluster(reg)
 }
 
-func (this Configuration) RegisterMapping(reg mappings.Registerable) error {
-	return this.controller_reg.RegisterMapping(reg)
-}
-func (this Configuration) MustRegisterMapping(reg mappings.Registerable) mappings.RegistrationInterface {
-	return this.controller_reg.MustRegisterMapping(reg)
-}
-
-func (this Configuration) RegisterGroup(name string) (*groups.Configuration, error) {
-	return this.controller_reg.RegisterGroup(name)
-}
-func (this Configuration) MustRegisterGroup(name string) *groups.Configuration {
-	return this.controller_reg.MustRegisterGroup(name)
-}
-
-func (this Configuration) RegisterController(reg controller.Registerable, groups ...string) error {
-	return this.controller_reg.RegisterController(reg, groups...)
-}
-func (this Configuration) MustRegisterController(reg controller.Registerable, groups ...string) controller.RegistrationInterface {
-	return this.controller_reg.MustRegisterController(reg, groups...)
-}
-
-func (this Configuration) Definition() *Definition {
-	return &Definition{
-		name:            this.name,
-		description:     this.description,
-		cluster_defs:    this.cluster_reg.GetDefinitions(),
-		controller_defs: this.controller_reg.GetDefinitions(),
+func (this Configuration) Definition() Definition {
+	cluster_defs := this.cluster_reg.GetDefinitions().Reconfigure(func(configuration cluster.Configuration) cluster.Configuration {
+		configuration = configuration.MininalWatches(this.globalMinimalWatch.AsArray()...)
+		if m, ok := this.clusterMinimalWatch[configuration.Definition().Name()]; ok {
+			configuration = configuration.MininalWatches(m.AsArray()...)
+		}
+		return configuration
+	})
+	return &_Definition{
+		name:         this.name,
+		description:  this.description,
+		extensions:   this.extension_reg.GetDefinitions(),
+		cluster_defs: cluster_defs,
+		gkMigrations: this.groupKindMigrations,
 	}
 }

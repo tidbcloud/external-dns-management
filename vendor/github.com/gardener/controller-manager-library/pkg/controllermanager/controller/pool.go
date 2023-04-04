@@ -1,17 +1,7 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package controller
@@ -25,11 +15,12 @@ import (
 	"github.com/gardener/controller-manager-library/pkg/controllermanager/controller/reconcile"
 	"github.com/gardener/controller-manager-library/pkg/server/healthz"
 
+	"k8s.io/client-go/util/workqueue"
+
 	"github.com/gardener/controller-manager-library/pkg/ctxutil"
 	"github.com/gardener/controller-manager-library/pkg/logger"
 	"github.com/gardener/controller-manager-library/pkg/resources"
 	"github.com/gardener/controller-manager-library/pkg/utils"
-	"k8s.io/client-go/util/workqueue"
 )
 
 var poolkey reflect.Type
@@ -80,8 +71,10 @@ func (this *reconcilerMapping) getReconcilers(key interface{}) reconcilers {
 	return i
 }
 
-func (this *reconcilerMapping) addReconciler(key interface{}, reconciler reconcile.Interface) {
+func (this *reconcilerMapping) addReconciler(key ReconcilationElementSpec, reconciler reconcile.Interface) {
 	switch k := key.(type) {
+	case utils.StringMatcher:
+		this.values[string(k)] = this.values[string(k)].add(reconciler)
 	case utils.Matcher:
 		this.matchers[k] = this.matchers[k].add(reconciler)
 	default:
@@ -113,7 +106,9 @@ func NewPool(controller *controller, name string, size int, period time.Duration
 		reconcilers: newReconcilerMapping(),
 	}
 	pool.ctx, pool.LogContext = logger.WithLogger(
-		ctxutil.SyncContext(context.WithValue(controller.ctx, poolkey, pool)),
+		ctxutil.WaitGroupContext(
+			context.WithValue(controller.GetContext(), poolkey, pool),
+			fmt.Sprintf("pool %s of controller %s", name, controller.GetName())),
 		"pool", name)
 	if pool.period != 0 {
 		pool.Infof("pool size %d, resync period %s", pool.size, pool.period.String())
@@ -127,7 +122,7 @@ func (p *pool) whenReady() {
 	p.controller.whenReady()
 }
 
-func (p *pool) addReconciler(key interface{}, reconciler reconcile.Interface) {
+func (p *pool) addReconciler(key ReconcilationElementSpec, reconciler reconcile.Interface) {
 	p.Infof("adding reconciler %T for key %q", reconciler, key)
 	p.reconcilers.addReconciler(key, reconciler)
 }
@@ -175,12 +170,12 @@ func (p *pool) Run() {
 	<-p.ctx.Done()
 	p.workqueue.ShutDown()
 	p.Infof("waiting for workers to shutdown")
-	ctxutil.SyncPointWait(p.ctx, 120*time.Second)
+	ctxutil.WaitGroupWait(p.ctx, 120*time.Second)
 	healthz.End(p.Key())
 }
 
 func (p *pool) startWorker(number int, stopCh <-chan struct{}) {
-	ctxutil.SyncPointRunUntilCancelled(p.ctx, func() { newWorker(p, number).Run() })
+	ctxutil.WaitGroupRunUntilCancelled(p.ctx, func() { newWorker(p, number).Run() })
 }
 func (p *pool) EnqueueCommand(cmd string) {
 	p.enqueueCommand(cmd, p.workqueue.Add)
@@ -210,17 +205,17 @@ func (p *pool) enqueueKey(key resources.ClusterObjectKey, add func(interface{}))
 	add(okey)
 }
 
-func (p *pool) EnqueueObject(obj resources.Object) {
+func (p *pool) EnqueueObject(obj resources.ObjectInfo) {
 	p.enqueueObject(obj, p.workqueue.Add)
 }
-func (p *pool) EnqueueObjectRateLimited(obj resources.Object) {
+func (p *pool) EnqueueObjectRateLimited(obj resources.ObjectInfo) {
 	p.enqueueObject(obj, p.workqueue.AddRateLimited)
 }
-func (p *pool) EnqueueObjectAfter(obj resources.Object, duration time.Duration) {
+func (p *pool) EnqueueObjectAfter(obj resources.ObjectInfo, duration time.Duration) {
 	p.enqueueObject(obj, func(key interface{}) { p.workqueue.AddAfter(key, duration) })
 }
 
-func (p *pool) enqueueObject(obj resources.Object, add func(interface{})) {
+func (p *pool) enqueueObject(obj resources.ObjectInfo, add func(interface{})) {
 	if obj == nil {
 		panic("cannot enqueue nil objects")
 	}

@@ -1,17 +1,7 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package utils
@@ -20,7 +10,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/Masterminds/semver"
+	"github.com/Masterminds/semver/v3"
 )
 
 // Versioned maintains a set of provided object versions and yields the best
@@ -45,6 +35,10 @@ func (this *Versioned) SetDefault(obj interface{}) error {
 	}
 	this.def = obj
 	return nil
+}
+
+func (this *Versioned) GetDefault() interface{} {
+	return this.def
 }
 
 func (this *Versioned) RegisterVersion(v *semver.Version, obj interface{}) error {
@@ -75,4 +69,16 @@ func (this *Versioned) GetFor(req *semver.Version) interface{} {
 		}
 	}
 	return obj
+}
+
+func (this *Versioned) GetVersions() map[*semver.Version]interface{} {
+	result := map[*semver.Version]interface{}{}
+	for v, o := range this.versions {
+		vers, _ := semver.NewVersion(v)
+		result[vers] = o
+	}
+	if this.def != nil {
+		result[nil] = this.def
+	}
+	return result
 }

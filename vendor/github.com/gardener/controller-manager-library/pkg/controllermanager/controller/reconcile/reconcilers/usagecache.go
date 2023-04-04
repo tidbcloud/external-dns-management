@@ -1,35 +1,29 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package reconcilers
 
 import (
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/gardener/controller-manager-library/pkg/controllermanager/controller"
 	"github.com/gardener/controller-manager-library/pkg/controllermanager/controller/reconcile"
 	"github.com/gardener/controller-manager-library/pkg/logger"
 	"github.com/gardener/controller-manager-library/pkg/resources"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
-// SlaveAccess to be used as common nested base for all reconcilers
-// requiring slave access
+// UsageAccess to be used as common nested base for all reconcilers
+// requiring usage access
 ////////////////////////////////////////////////////////////////////////////////
+
+type UsageAccessSink interface {
+	InjectUsageAccess(*UsageAccess)
+}
 
 type UsageAccess struct {
 	controller.Interface
@@ -44,10 +38,14 @@ type UsageAccess struct {
 type UsedExtractorFactory func(controller.Interface) resources.UsedExtractor
 
 type UsageAccessSpec struct {
-	Name             string
-	MasterResources  Resources
-	Extractor        resources.UsedExtractor
-	ExtractorFactory UsedExtractorFactory
+	Name                string
+	Namespace           string
+	MasterResources     Resources
+	Extractor           resources.UsedExtractor
+	ExtractorFactory    UsedExtractorFactory
+	RequeueDeleting     bool
+	RequeueMaster       resources.KeyFilter // master resources to trigger for used updated
+	RequeueMasterByUsed resources.KeyFilter // used resources to trigger masters on update
 }
 
 func NewUsageAccessBySpec(c controller.Interface, spec UsageAccessSpec) *UsageAccess {
@@ -80,7 +78,7 @@ func (this *UsageAccess) setupUsageCache() interface{} {
 
 	this.Infof("setup %s usage cache", this.name)
 	for _, r := range this.master_resources.resources {
-		list, _ := r.ListCached(labels.Everything())
+		list, _ := listCachedWithNamespace(r, this.spec.Namespace)
 		cache.Setup(list)
 	}
 	this.Infof("found %d %s(s) for %d objects", cache.UsedCount(), this.name, cache.Size())
@@ -166,6 +164,9 @@ func NewUsageReconcilerBySpec(c controller.Interface, reconciler controller.Reco
 		return nil, err
 	}
 	r.NestedReconciler = nested
+	if s, ok := nested.nested.(UsageAccessSink); ok {
+		s.InjectUsageAccess(r.UsageAccess)
+	}
 	return r, nil
 }
 
@@ -182,22 +183,28 @@ func (this *UsageReconciler) Setup() {
 }
 
 func (this *UsageReconciler) Reconcile(logger logger.LogContext, obj resources.Object) reconcile.Status {
-	if this.master_resources.Contains(obj.GroupKind()) {
-		logger.Infof("reconcile owner %s", obj.ClusterKey())
+	key := obj.ClusterKey()
+	if this.master_resources.Contains(key.Cluster(), obj.GroupKind()) {
+		logger.Infof("reconcile owner %s", key)
 		this.usages.RenewOwner(obj)
 	} else {
-		logger.Infof("reconcile used %s", obj.ClusterKey())
-		this.requeueMasters(logger, this.GetOwnersFor(obj.ClusterKey(), false))
+		logger.Infof("reconcile used %s", key)
+	}
+
+	if this.spec.RequeueMasterByUsed == nil || this.spec.RequeueMasterByUsed(key) {
+		this.requeueMasters(logger, this.GetOwnersFor(key, false))
 	}
 	return this.NestedReconciler.Reconcile(logger, obj)
 }
 
 func (this *UsageReconciler) Deleted(logger logger.LogContext, key resources.ClusterObjectKey) reconcile.Status {
-	if this.master_resources.Contains(key.GroupKind()) {
+	if this.master_resources.Contains(key.Cluster(), key.GroupKind()) {
 		logger.Infof("deleted owner %s", key)
 		this.usages.DeleteOwner(key)
 	} else {
 		logger.Infof("deleted used %s", key)
+	}
+	if this.spec.RequeueMasterByUsed == nil || this.spec.RequeueMasterByUsed(key) {
 		this.requeueMasters(logger, this.GetOwnersFor(key, false))
 	}
 	return this.NestedReconciler.Deleted(logger, key)
@@ -205,14 +212,16 @@ func (this *UsageReconciler) Deleted(logger logger.LogContext, key resources.Clu
 
 func (this *UsageReconciler) requeueMasters(logger logger.LogContext, masters resources.ClusterObjectKeySet) {
 	for key := range masters {
-		m, err := this.GetObject(key)
-		if err == nil || errors.IsNotFound(err) {
-			if m.IsDeleting() {
-				logger.Infof("skipping requeue of deleting master %s", key)
-				continue
+		if this.spec.RequeueMaster == nil || this.spec.RequeueMaster(key) {
+			m, err := this.GetObject(key)
+			if err == nil || errors.IsNotFound(err) {
+				if !this.spec.RequeueDeleting && m.IsDeleting() {
+					logger.Infof("skipping requeue of deleting master %s", key)
+					continue
+				}
 			}
+			logger.Infof("requeue master %s", key)
+			this.EnqueueKey(key)
 		}
-		logger.Infof("requeue master %s", key)
-		this.EnqueueKey(key)
 	}
 }

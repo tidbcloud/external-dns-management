@@ -1,22 +1,15 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package resources
 
 import (
+	"fmt"
+
+	"github.com/gardener/controller-manager-library/pkg/logger"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -32,11 +25,13 @@ type entry struct {
 }
 
 type SlaveCache struct {
-	cache SubObjectCache
+	migration   ClusterIdMigration
+	gkMigration GroupKindMigration
+	cache       SubObjectCache
 }
 
-func NewSlaveCache() *SlaveCache {
-	return &SlaveCache{*NewSubObjectCache(func(o Object) ClusterObjectKeySet { return o.GetOwners() })}
+func NewSlaveCache(migration ClusterIdMigration, gkMigration GroupKindMigration) *SlaveCache {
+	return &SlaveCache{migration, gkMigration, *NewSubObjectCache(func(o Object) ClusterObjectKeySet { return o.GetOwners() })}
 }
 
 func (this *SlaveCache) AddOwnerFilter(filters ...KeyFilter) *SlaveCache {
@@ -58,6 +53,22 @@ func (this *SlaveCache) SlaveCount() int {
 }
 
 func (this *SlaveCache) Setup(slaves []Object) {
+	if this.migration != nil {
+		for _, s := range slaves {
+			err := MigrateOwnerClusterIds(s, this.migration)
+			if err != nil {
+				panic(fmt.Errorf("owner cluster id migration failed for %s: %s", s.ClusterKey(), err))
+			}
+		}
+	}
+	if this.gkMigration != nil {
+		for _, s := range slaves {
+			err := MigrateGroupKinds(s, this.gkMigration)
+			if err != nil {
+				logger.Errorf("owner GroupKind migration failed for %s: %s", s.ClusterKey(), err)
+			}
+		}
+	}
 	this.cache.Setup(slaves)
 }
 
@@ -121,6 +132,11 @@ func (this *SlaveCache) AddSlave(obj Object, slave Object) error {
 func (this *SlaveCache) CreateSlave(obj Object, slave Object) error {
 	slave.AddOwner(obj)
 	return this.cache.CreateSubObject(slave)
+}
+
+func (this *SlaveCache) CreateOrModifySlave(obj Object, slave Object, mod Modifier) (bool, error) {
+	slave.AddOwner(obj)
+	return this.cache.CreateOrModifySubObject(slave, mod)
 }
 
 func (this *SlaveCache) Remove(obj Object, slave Object) bool {

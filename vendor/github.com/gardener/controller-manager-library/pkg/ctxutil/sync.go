@@ -1,23 +1,15 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package ctxutil
 
 import (
 	"context"
+	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -26,59 +18,94 @@ import (
 
 var synckey = ""
 
-func SyncContext(ctx context.Context) context.Context {
-	var wg sync.WaitGroup
-	return context.WithValue(ctx, &synckey, &wg)
+type WaitGroup struct {
+	name string
+	sync.WaitGroup
 }
 
-func get_wg(ctx context.Context) *sync.WaitGroup {
-	return ctx.Value(&synckey).(*sync.WaitGroup)
-}
-
-func SyncPointAdd(ctx context.Context) {
-	get_wg(ctx).Add(1)
-}
-
-func SyncPointDone(ctx context.Context) {
-	get_wg(ctx).Done()
-}
-
-func SyncPointWait(ctx context.Context, duration time.Duration) {
+func (this *WaitGroup) WaitWithTimeout(duration time.Duration, desc ...string) {
 	if duration <= 0 {
-		get_wg(ctx).Wait()
+		this.Wait()
 	} else {
 		shutdown, cancel := context.WithCancel(context.Background())
 		timer := time.NewTimer(duration)
 
 		go func() {
-			get_wg(ctx).Wait()
+			this.Wait()
 			cancel()
 		}()
 		select {
 		case <-shutdown.Done():
 		case <-timer.C:
+			msg := ""
+			if this.name != "" {
+				msg = this.name + ": "
+			}
+			if len(desc) > 0 {
+				for _, d := range desc {
+					msg += d
+				}
+				msg += ": "
+			}
+
+			fmt.Printf("*** %swait timed out -> generating stack traces\n", msg)
+			buf := make([]byte, 1<<16)
+			stackSize := runtime.Stack(buf, true)
+			fmt.Printf("%s\n", string(buf[0:stackSize]))
 			cancel()
 		}
 	}
 }
 
-func SyncPointRun(ctx context.Context, f func()) {
-	SyncPointAdd(ctx)
+func NewWaitGroup(name string) *WaitGroup {
+	return &WaitGroup{name: name}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+func WaitGroupContext(ctx context.Context, desc ...string) context.Context {
+	name := ""
+	if len(desc) > 0 {
+		for _, d := range desc {
+			name += d
+		}
+	}
+	return context.WithValue(ctx, &synckey, NewWaitGroup(name))
+}
+
+func get_wg(ctx context.Context) *WaitGroup {
+	return ctx.Value(&synckey).(*WaitGroup)
+}
+
+func WaitGroupAdd(ctx context.Context) {
+	get_wg(ctx).Add(1)
+}
+
+func WaitGroupDone(ctx context.Context) {
+	get_wg(ctx).Done()
+}
+
+func WaitGroupWait(ctx context.Context, duration time.Duration, desc ...string) {
+	get_wg(ctx).WaitWithTimeout(duration, desc...)
+}
+
+func WaitGroupRun(ctx context.Context, f func()) {
+	WaitGroupAdd(ctx)
 	go func() {
-		defer SyncPointDone(ctx)
+		defer WaitGroupDone(ctx)
 		f()
 	}()
 }
 
-func SyncPointRunAndCancelOnExit(ctx context.Context, f func()) {
-	SyncPointAdd(ctx)
+func WaitGroupRunAndCancelOnExit(ctx context.Context, f func()) {
+	WaitGroupAdd(ctx)
 	go func() {
 		defer Cancel(ctx)
-		defer SyncPointDone(ctx)
+		defer WaitGroupDone(ctx)
 		f()
 	}()
 }
 
-func SyncPointRunUntilCancelled(ctx context.Context, f func()) {
-	SyncPointRun(ctx, func() { wait.Until(f, time.Second, ctx.Done()) })
+func WaitGroupRunUntilCancelled(ctx context.Context, f func()) {
+	WaitGroupRun(ctx, func() { wait.Until(f, time.Second, ctx.Done()) })
 }

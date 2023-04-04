@@ -1,351 +1,162 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package resources
 
 import (
-	"fmt"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"strings"
+
+	"github.com/gardener/controller-manager-library/pkg/resources/abstract"
 )
-
-////////////////////////////////////////////////////////////////////////////////
-// ObjectKey
-////////////////////////////////////////////////////////////////////////////////
-
-var _ GroupKindProvider = ObjectKey{}
-
-func NewKey(groupKind schema.GroupKind, namespace, name string) ObjectKey {
-	return ObjectKey{groupKind, NewObjectName(namespace, name)}
-}
-
-func (this ObjectKey) GroupKind() schema.GroupKind {
-	return this.groupKind
-}
-
-func (this ObjectKey) Group() string {
-	return this.groupKind.Group
-}
-
-func (this ObjectKey) Kind() string {
-	return this.groupKind.Kind
-}
-
-func (this ObjectKey) Namespace() string {
-	return this.name.Namespace()
-}
-
-func (this ObjectKey) ObjectName() ObjectName {
-	return this.name
-}
-
-func (this ObjectKey) Name() string {
-	return this.name.Name()
-}
-
-func (this ObjectKey) ForCluster(id string) ClusterObjectKey {
-	return ClusterObjectKey{id, objectKey{this}}
-}
-
-func (this ObjectKey) String() string {
-	return fmt.Sprintf("%s/%s/%s", this.groupKind.Group, this.groupKind.Kind, this.name)
-}
-
-func NewGroupKind(group, kind string) schema.GroupKind {
-	if group == "core" {
-		group = ""
-	}
-	return schema.GroupKind{Group: group, Kind: kind}
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 // ClusterObjectKey
 ////////////////////////////////////////////////////////////////////////////////
 
+func EqualsClusterObjectKey(a, b ClusterObjectKey) bool {
+	return abstract.EqualsClusterObjectKey(a, b)
+}
+
 func NewClusterKeyForObject(cluster string, key ObjectKey) ClusterObjectKey {
-	return ClusterObjectKey{cluster, objectKey{key}}
+	return abstract.NewClusterKeyForObject(cluster, key)
 }
 
 func NewClusterKey(cluster string, groupKind schema.GroupKind, namespace, name string) ClusterObjectKey {
-	return ClusterObjectKey{cluster, objectKey{ObjectKey{groupKind, NewObjectName(namespace, name)}}}
-}
-
-func (this ClusterObjectKey) String() string {
-	return this.asString()
-}
-
-func (this ClusterObjectKey) asString() string {
-	return fmt.Sprintf("%s:%s", this.cluster, this.objectKey.ObjectKey)
-}
-
-func (this ClusterObjectKey) Cluster() string {
-	return this.cluster
-}
-
-func (this ClusterObjectKey) ObjectKey() ObjectKey {
-	return this.objectKey.ObjectKey
-}
-
-func (this ClusterObjectKey) AsRefFor(clusterid string) string {
-	if this.cluster == clusterid {
-		return this.objectKey.String()
-	}
-	return this.asString()
+	return abstract.NewClusterKey(cluster, groupKind, namespace, name)
 }
 
 func ParseClusterObjectKey(clusterid string, key string) (ClusterObjectKey, error) {
-	id := clusterid
-	i := strings.Index(key, ":")
-	if i >= 0 {
-		id = key[:i]
-		key = key[i+1:]
-	}
-	comps := strings.Split(key, "/")
-	switch len(comps) {
-	case 4:
-		return NewClusterKey(id, NewGroupKind(comps[0], comps[1]), comps[2], comps[3]), nil
-	default:
-		return ClusterObjectKey{}, fmt.Errorf("invalid cluster object key format")
-	}
+	return abstract.ParseClusterObjectKey(clusterid, key)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // Cluster Object Key Set
 ////////////////////////////////////////////////////////////////////////////////
 
-type ClusterObjectKeySet map[ClusterObjectKey]struct{}
+type ClusterObjectKeys = abstract.ClusterObjectKeys
+type ClusterObjectKeySet = abstract.ClusterObjectKeySet
 
 func NewClusterObjectKeySet(a ...ClusterObjectKey) ClusterObjectKeySet {
-	return ClusterObjectKeySet{}.Add(a...)
+	return abstract.NewClusterObjectKeySet(a...)
 }
 
 func NewClusterObjectKeySetByArray(a []ClusterObjectKey) ClusterObjectKeySet {
-	s := ClusterObjectKeySet{}
-	if a != nil {
-		s.Add(a...)
-	}
-	return s
+	return abstract.NewClusterObjectKeySetByArray(a)
 }
 
 func NewClusterObjectKeSetBySets(sets ...ClusterObjectKeySet) ClusterObjectKeySet {
-	s := ClusterObjectKeySet{}
-	for _, set := range sets {
-		for a := range set {
-			s.Add(a)
-		}
-	}
-	return s
+	return abstract.NewClusterObjectKeSetBySets(sets...)
 }
 
-func (this ClusterObjectKeySet) String() string {
-	sep := ""
-	data := "["
-	for k := range this {
-		data = fmt.Sprintf("%s%s'%s'", data, sep, k)
-		sep = ", "
-	}
-	return data + "]"
+////////////////////////////////////////////////////////////////////////////////
+// Object Key
+////////////////////////////////////////////////////////////////////////////////
+
+func EqualsObjectKey(a, b ObjectKey) bool {
+	return abstract.EqualsObjectKey(a, b)
 }
 
-func (this ClusterObjectKeySet) Contains(n ClusterObjectKey) bool {
-	_, ok := this[n]
-	return ok
+func NewKey(groupKind schema.GroupKind, namespace, name string) ObjectKey {
+	return abstract.NewKey(groupKind, namespace, name)
 }
 
-func (this ClusterObjectKeySet) Remove(n ClusterObjectKey) ClusterObjectKeySet {
-	delete(this, n)
-	return this
+func NewKeyForData(data ObjectData) ObjectKey {
+	return abstract.NewKeyForData(data)
 }
 
-func (this ClusterObjectKeySet) AddAll(n []ClusterObjectKey) ClusterObjectKeySet {
-	return this.Add(n...)
-}
+////////////////////////////////////////////////////////////////////////////////
+// Group Kind
+////////////////////////////////////////////////////////////////////////////////
 
-func (this ClusterObjectKeySet) Add(n ...ClusterObjectKey) ClusterObjectKeySet {
-	for _, p := range n {
-		this[p] = struct{}{}
-	}
-	return this
-}
-
-func (this ClusterObjectKeySet) AddSet(sets ...ClusterObjectKeySet) ClusterObjectKeySet {
-	for _, s := range sets {
-		for e := range s {
-			this.Add(e)
-		}
-	}
-	return this
-}
-
-func (this ClusterObjectKeySet) Equals(set ClusterObjectKeySet) bool {
-	for n := range set {
-		if !this.Contains(n) {
-			return false
-		}
-	}
-	for n := range this {
-		if !set.Contains(n) {
-			return false
-		}
-	}
-	return true
-}
-
-func (this ClusterObjectKeySet) DiffFrom(set ClusterObjectKeySet) (add, del ClusterObjectKeySet) {
-	add = ClusterObjectKeySet{}
-	del = ClusterObjectKeySet{}
-	for n := range set {
-		if !this.Contains(n) {
-			add.Add(n)
-		}
-	}
-	for n := range this {
-		if !set.Contains(n) {
-			del.Add(n)
-		}
-	}
-	return
-}
-
-func (this ClusterObjectKeySet) Copy() ClusterObjectKeySet {
-	set := NewClusterObjectKeySet()
-	for n := range this {
-		set[n] = struct{}{}
-	}
-	return set
-}
-
-func (this ClusterObjectKeySet) AsArray() []ClusterObjectKey {
-	a := []ClusterObjectKey{}
-	for n := range this {
-		a = append(a, n)
-	}
-	return a
+func NewGroupKind(group, kind string) schema.GroupKind {
+	return abstract.NewGroupKind(group, kind)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // Group Kind Set
 ////////////////////////////////////////////////////////////////////////////////
 
-type GroupKindSet map[schema.GroupKind]struct{}
+type GroupKindSet = abstract.GroupKindSet
 
 func NewGroupKindSet(a ...schema.GroupKind) GroupKindSet {
-	return GroupKindSet{}.Add(a...)
+	return abstract.NewGroupKindSet(a...)
 }
 
 func NewGroupKindSetByArray(a []schema.GroupKind) GroupKindSet {
-	s := GroupKindSet{}
-	if a != nil {
-		s.Add(a...)
-	}
-	return s
+	return abstract.NewGroupKindSetByArray(a)
 }
 
-func NewsGroupKindSetBySets(sets ...GroupKindSet) GroupKindSet {
-	s := GroupKindSet{}
-	for _, set := range sets {
-		for a := range set {
-			s.Add(a)
-		}
-	}
-	return s
+func NewGroupKindSetBySets(sets ...GroupKindSet) GroupKindSet {
+	return abstract.NewGroupKindSetBySets(sets...)
 }
 
-func (this GroupKindSet) String() string {
-	sep := ""
-	data := "["
-	for k := range this {
-		data = fmt.Sprintf("%s%s'%s'", data, sep, k)
-		sep = ", "
-	}
-	return data + "]"
+////////////////////////////////////////////////////////////////////////////////
+// Cluster Group Kind
+////////////////////////////////////////////////////////////////////////////////
+
+func NewClusterGroupKind(cluster string, gk schema.GroupKind) ClusterGroupKind {
+	return abstract.NewClusterGroupKind(cluster, gk)
 }
 
-func (this GroupKindSet) Contains(n schema.GroupKind) bool {
-	_, ok := this[n]
-	return ok
+////////////////////////////////////////////////////////////////////////////////
+// Cluster Group Kind Set
+////////////////////////////////////////////////////////////////////////////////
+
+type ClusterGroupKindSet = abstract.ClusterGroupKindSet
+
+func NewClusterGroupKindSet(a ...ClusterGroupKind) ClusterGroupKindSet {
+	return abstract.NewClusterGroupKindSet(a...)
 }
 
-func (this GroupKindSet) Remove(n schema.GroupKind) GroupKindSet {
-	delete(this, n)
-	return this
+func NewClusterGroupKindSetByArray(a []ClusterGroupKind) ClusterGroupKindSet {
+	return abstract.NewClusterGroupKindSetByArray(a)
 }
 
-func (this GroupKindSet) AddAll(n []schema.GroupKind) GroupKindSet {
-	return this.Add(n...)
+func NewClusterGroupKindSetBySets(sets ...ClusterGroupKindSet) ClusterGroupKindSet {
+	return abstract.NewClusterGroupKindSetBySets(sets...)
 }
 
-func (this GroupKindSet) Add(n ...schema.GroupKind) GroupKindSet {
-	for _, p := range n {
-		this[p] = struct{}{}
-	}
-	return this
+////////////////////////////////////////////////////////////////////////////////
+// Object Name
+////////////////////////////////////////////////////////////////////////////////
+
+func EqualsObjectName(a, b ObjectName) bool {
+	return abstract.EqualsObjectName(a, b)
 }
 
-func (this GroupKindSet) AddSet(sets ...GroupKindSet) GroupKindSet {
-	for _, s := range sets {
-		for e := range s {
-			this.Add(e)
-		}
-	}
-	return this
+func NewObjectNameFor(p ObjectNameProvider) abstract.GenericObjectName {
+	return abstract.NewObjectNameFor(p)
 }
 
-func (this GroupKindSet) Equals(set GroupKindSet) bool {
-	for n := range set {
-		if !this.Contains(n) {
-			return false
-		}
-	}
-	for n := range this {
-		if !set.Contains(n) {
-			return false
-		}
-	}
-	return true
+func NewObjectNameForData(data ObjectData) ObjectName {
+	return abstract.NewObjectNameForData(data)
 }
 
-func (this GroupKindSet) DiffFrom(set GroupKindSet) (add, del GroupKindSet) {
-	add = GroupKindSet{}
-	del = GroupKindSet{}
-	for n := range set {
-		if !this.Contains(n) {
-			add.Add(n)
-		}
-	}
-	for n := range this {
-		if !set.Contains(n) {
-			del.Add(n)
-		}
-	}
-	return
+func NewObjectName(names ...string) abstract.GenericObjectName {
+	return abstract.NewObjectName(names...)
 }
 
-func (this GroupKindSet) Copy() GroupKindSet {
-	set := NewGroupKindSet()
-	for n := range this {
-		set[n] = struct{}{}
-	}
-	return set
+func ParseObjectName(name string) (abstract.GenericObjectName, error) {
+	return abstract.ParseObjectName(name)
 }
 
-func (this GroupKindSet) AsArray() []schema.GroupKind {
-	a := []schema.GroupKind{}
-	for n := range this {
-		a = append(a, n)
-	}
-	return a
+////////////////////////////////////////////////////////////////////////////////
+// Object Name Set
+////////////////////////////////////////////////////////////////////////////////
+
+type ObjectNameSet = abstract.ObjectNameSet
+
+func NewObjectNameSet(a ...ObjectName) ObjectNameSet {
+	return abstract.NewObjectNameSet(a...)
+}
+
+func NewObjectNameSetByArray(a []ObjectName) ObjectNameSet {
+	return abstract.NewObjectNameSetByArray(a)
+}
+
+func NewObjectNameSetBySets(sets ...ObjectNameSet) ObjectNameSet {
+	return abstract.NewObjectNameSetBySets(sets...)
 }

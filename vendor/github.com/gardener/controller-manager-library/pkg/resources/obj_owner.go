@@ -1,25 +1,17 @@
 /*
- * Copyright 2019 SAP SE or an SAP affiliate company. All rights reserved. This file is licensed under the Apache Software License, v. 2 except as noted otherwise in the LICENSE file
+ * SPDX-FileCopyrightText: 2019 SAP SE or an SAP affiliate company and Gardener contributors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package resources
 
 import (
+	"fmt"
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"strings"
 )
 
 const owner_annotation = "resources.gardener.cloud/owners"
@@ -42,6 +34,121 @@ func GetAnnotatedOwners(data ObjectData) []string {
 	return r
 }
 
+func MigrateOwnerClusterIds(obj Object, migration ClusterIdMigration) error {
+	_, err := obj.Modify(func(od ObjectData) (bool, error) {
+		mod := false
+		s, err := obj.GetResource().Wrap(od)
+		if err != nil {
+			return false, err
+		}
+		for o := range s.GetOwners() {
+			if new := migration.RequireMigration(o.Cluster()); new != "" {
+				mod = MigrateOwnerClusterId(od, obj.GetCluster().GetId(), o, new) || mod
+			}
+		}
+		return mod, nil
+	})
+	if err != nil {
+		return fmt.Errorf("owner cluster id migration failed for %s: %s", obj.ClusterKey(), err)
+	}
+	return nil
+}
+
+// MigrateOwnerClusterId switch the cluster id for a referenced object.
+// the new cluster id MUST be the actual cluster id of the SAME cluster
+// formally denoted by the current id of the the ClusterObjectKey.
+// Meaning: namespace local references will be kept, there is no switch
+// to a cross namespace of cross cluster reference.
+func MigrateOwnerClusterId(data ObjectData, clusterid string, owner ClusterObjectKey, newid string) bool {
+	if owner.Namespace() == data.GetNamespace() && newid == clusterid {
+		return false
+	} else {
+		// maintain foreign references via annotations
+
+		// in case of a migration for a local ref this id (ref) is wrongly calculated including
+		// the old cluster id (instead on none), but this does not matter because
+		// this one is not a valid ref for the actual object and the new one will
+		// correctly be calculated without cluster id
+		// so that the modification coding below will produce no diff
+		ref := owner.AsRefFor(clusterid)
+		newref := owner.ChangeCluster(newid).AsRefFor(clusterid)
+		if ref == newref {
+			return false
+		}
+		refs := GetAnnotatedOwners(data)
+		new := []string{}
+		found := false
+
+		for _, r := range refs {
+			if ref != r {
+				new = append(new, r)
+			}
+			if newref == r {
+				found = true
+			}
+		}
+		if !found {
+			new = append(new, newref)
+		}
+		return SetAnnotation(data, owner_annotation, strings.Join(new, ","))
+	}
+}
+
+func MigrateGroupKinds(obj Object, migration GroupKindMigration) error {
+	_, err := obj.Modify(func(od ObjectData) (bool, error) {
+		mod := false
+		s, err := obj.GetResource().Wrap(od)
+		if err != nil {
+			return false, err
+		}
+		for o := range s.GetOwners() {
+			if new := migration.RequireMigration(o.GroupKind()); new != nil {
+				mod = MigrateOwnerGroupKind(od, obj.GetCluster(), o, *new) || mod
+			}
+		}
+		return mod, nil
+	})
+	if err != nil {
+		return fmt.Errorf("owner group kind migration failed for %s: %s", obj.ClusterKey(), err)
+	}
+	return nil
+}
+
+// MigrateOwnerGroupKind switch the GroupKind for a referenced object.
+func MigrateOwnerGroupKind(data ObjectData, cluster Cluster, owner ClusterObjectKey, new schema.GroupKind) bool {
+	if owner.Namespace() == data.GetNamespace() && owner.Cluster() == cluster.GetId() {
+		res, err := cluster.Resources().GetByGK(new)
+		if err != nil {
+			return false
+		}
+		ownerObj, err := res.Get(owner.ObjectName())
+		if err != nil {
+			return false
+		}
+		if RemoveOwnerReferenceByKey(data, owner.ObjectKey()) {
+			SetOwnerReference(data, ownerObj.GetOwnerReference())
+			return true
+		}
+		return false
+	} else {
+		// maintain foreign references via annotations
+
+		ref := owner.String()
+		newref := owner.ChangeGroupKind(new).String()
+		refs := GetAnnotatedOwners(data)
+		new := []string{}
+
+		for _, r := range refs {
+			if ref != r {
+				new = append(new, r)
+			} else {
+				new = append(new, newref)
+			}
+		}
+		return SetAnnotation(data, owner_annotation, strings.Join(new, ","))
+	}
+}
+
 func (this *AbstractObject) AddOwner(obj Object) bool {
 	return AddOwner(this, this.self.GetCluster().GetId(), obj)
 }
@@ -56,7 +163,7 @@ func AddOwner(data ObjectData, clusterid string, obj Object) bool {
 		ref := owner.AsRefFor(clusterid)
 		refs := GetAnnotatedOwners(data)
 		for _, r := range refs {
-			if ref == strings.TrimSpace(r) {
+			if ref == r {
 				return false
 			}
 		}

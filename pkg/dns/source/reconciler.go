@@ -109,15 +109,10 @@ type sourceReconciler struct {
 	state *state
 }
 
-func (this *sourceReconciler) Start() {
-	this.SlaveAccess.Start()
-	this.NestedReconciler.Start()
-}
-
-func (this *sourceReconciler) Setup() {
+func (this *sourceReconciler) Setup() error {
 	this.SlaveAccess.Setup()
 	this.state.source.Setup()
-	this.NestedReconciler.Setup()
+	return this.NestedReconciler.Setup()
 }
 
 func (this *sourceReconciler) Reconcile(logger logger.LogContext, obj resources.Object) reconcile.Status {
@@ -272,8 +267,9 @@ outer:
 }
 
 // Deleted is used as fallback, if the source object in another cluster is
-//  deleted unexpectedly (by removing the finalizer).
-//  It checks whether a slave is still available and deletes it.
+//
+//	deleted unexpectedly (by removing the finalizer).
+//	It checks whether a slave is still available and deletes it.
 func (this *sourceReconciler) Deleted(logger logger.LogContext, key resources.ClusterObjectKey) reconcile.Status {
 	logger.Infof("%s finally deleted", key)
 	failed := false
